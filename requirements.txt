@@ -1,0 +1,12 @@
+pyrogram
+tgcrypto
+python-dotenv
+yt-dlp
+Pillow
+requests
+aiofiles
+psutil
+psycopg2-binary
+cryptography
+
+

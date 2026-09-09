@@ -1,0 +1,34 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pyrogram session files
+*.session
+*.session-journal
+
+# Logs
+logs/
+*.log
+
+# Media downloads folder
+downloads/
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Reference Repo (Not for Production VPS)
+sbot_reference/

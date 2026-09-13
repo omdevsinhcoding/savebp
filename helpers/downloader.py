@@ -250,9 +250,24 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
                 progress=tracker.progress_callback
             )
 
-            # Check download succeeded
+            # If download failed, try to copy/forward instead of stopping
             if not file_path or not os.path.exists(file_path):
-                print(f"[ERROR] Download failed or file not found for user {user_id}")
+                print(f"[WARN] Download returned no file for user {user_id}, trying copy_message fallback")
+                for dest_chat, topic_id in targets:
+                    try:
+                        copy_kw = {"caption": final_caption}
+                        if topic_id:
+                            copy_kw["message_thread_id"] = topic_id
+                        try:
+                            await bot.copy_message(dest_chat, source_msg.chat.id, source_msg.id, **copy_kw)
+                        except TypeError as te:
+                            if "message_thread_id" in str(te):
+                                copy_kw.pop("message_thread_id", None)
+                                await bot.copy_message(dest_chat, source_msg.chat.id, source_msg.id, **copy_kw)
+                            else:
+                                raise
+                    except Exception as copy_err:
+                        print(f"[WARN] Copy fallback also failed to {dest_chat}: {copy_err}")
                 return
 
             upload_tracker = ProgressTracker(status_msg, action_text="📤 Uploading Media", user_id=user_id, is_cancelled=is_cancelled)

@@ -77,6 +77,7 @@ async def batch_range_command(client: Client, message: Message):
         if is_priv1 and not user_client:
             return await status.edit_text("🔐 **Private Channel!** Please login using `/login` first.")
 
+        processed_count = 0
         for current_id in range(start_id, end_id + 1):
             if is_cancelled():
                 await status.edit_text("🛑 **Batch Process Cancelled!**")
@@ -88,9 +89,11 @@ async def batch_range_command(client: Client, message: Message):
                 if getattr(msg, "empty", False) or (not msg.text and not msg.media):
                     continue
                 
-                msg_thread = getattr(msg, 'message_thread_id', None)
-                if expected_topic and msg_thread and msg_thread != expected_topic:
-                    continue
+                # Strict topic filtering — ONLY process messages from the expected topic
+                if expected_topic:
+                    msg_thread = getattr(msg, 'message_thread_id', None)
+                    if not msg_thread or msg_thread != expected_topic:
+                        continue
 
                 if msg and not msg.empty:
                     sub_status = await message.reply_text(f"🔄 **Processing Post {current_id}...**")
@@ -104,6 +107,7 @@ async def batch_range_command(client: Client, message: Message):
                     
                     try:
                         await task
+                        processed_count += 1
                     except asyncio.CancelledError:
                         await sub_status.edit_text(f"🛑 **File Skipped by User!**")
                         await asyncio.sleep(1)
@@ -117,7 +121,13 @@ async def batch_range_command(client: Client, message: Message):
                 print(f"[WARN] Batch skip post {current_id} in chat {chat_id1} (topic={expected_topic}): {e}")
 
         if not is_cancelled():
-            await status.edit_text("✅ **Batch Completed!**")
+            if processed_count > 0:
+                await status.edit_text(f"✅ **Batch Completed!** Processed {processed_count} posts.")
+            else:
+                await status.edit_text(
+                    f"❌ **No valid posts found in range!**\n\n"
+                    f"Make sure the message IDs exist in this topic."
+                )
 
     except Exception as e:
         await status.edit_text(f"❌ **Batch Error:** `{e}`")

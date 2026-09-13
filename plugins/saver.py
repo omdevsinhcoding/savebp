@@ -90,7 +90,7 @@ async def single_post_saver(client: Client, message: Message):
             finally:
                 unregister_task(task_id, user_id)
         else:
-            # Range Link (e.g. 135 to 137)
+            # Range Link (e.g. 27672-27676)
             total_posts = (end_id - start_id) + 1
             await status.edit_text(f"🚀 **Starting Range Extraction ({total_posts} posts)...**")
             
@@ -98,7 +98,8 @@ async def single_post_saver(client: Client, message: Message):
             BATCH_CANCEL_FLAGS[user_id] = False
             def is_cancelled():
                 return BATCH_CANCEL_FLAGS.get(user_id, False)
-                
+            
+            processed_count = 0
             for current_id in range(start_id, end_id + 1):
                 if is_cancelled():
                     await message.reply_text("🛑 **Process Cancelled!**")
@@ -108,9 +109,12 @@ async def single_post_saver(client: Client, message: Message):
                     if getattr(source_msg, "empty", False) or (not source_msg.text and not source_msg.media):
                         continue
                     
-                    msg_thread = getattr(source_msg, 'message_thread_id', None)
-                    if expected_topic and msg_thread and msg_thread != expected_topic:
-                        continue
+                    # Strict topic filtering — ONLY process messages from the expected topic
+                    if expected_topic:
+                        msg_thread = getattr(source_msg, 'message_thread_id', None)
+                        if not msg_thread or msg_thread != expected_topic:
+                            # This message is NOT in the expected topic, skip it
+                            continue
 
                     if source_msg and not source_msg.empty:
                         sub_status = await message.reply_text(f"🔄 **Processing Post {current_id}...**")
@@ -122,6 +126,7 @@ async def single_post_saver(client: Client, message: Message):
                         register_task(task_id, task, user_id)
                         try:
                             await task
+                            processed_count += 1
                         except asyncio.CancelledError:
                             await sub_status.edit_text("🛑 **File Skipped by User!**")
                             await asyncio.sleep(1)
@@ -135,7 +140,13 @@ async def single_post_saver(client: Client, message: Message):
                     print(f"[WARN] Range skip post {current_id} in chat {chat_id} (topic={expected_topic}): {e}")
 
             if not is_cancelled():
-                await status.edit_text("✅ **Batch Completed!**")
+                if processed_count > 0:
+                    await status.edit_text(f"✅ **Batch Completed!** Processed {processed_count}/{total_posts} posts.")
+                else:
+                    await status.edit_text(
+                        f"❌ **No valid posts found in range {start_id}-{end_id}!**\n\n"
+                        f"Make sure the message IDs exist in this topic."
+                    )
 
     except Exception as e:
         print(f"[ERROR] Saver error for user {user_id}, link={link}: {e}")

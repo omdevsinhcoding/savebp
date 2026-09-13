@@ -60,14 +60,25 @@ def parse_tg_link(link: str):
 ACTIVE_CLIENTS = {}
 
 async def get_user_client(user_id: int, api_id: int, api_hash: str):
+    # Try cached client first
     if user_id in ACTIVE_CLIENTS:
+        uc = ACTIVE_CLIENTS[user_id]
         try:
-            if not ACTIVE_CLIENTS[user_id].is_connected:
-                await ACTIVE_CLIENTS[user_id].start()
-            return ACTIVE_CLIENTS[user_id]
-        except Exception:
-            pass
+            if not uc.is_connected:
+                await uc.start()
+            # Validate the client is actually working with a lightweight call
+            await uc.get_me()
+            return uc
+        except Exception as e:
+            print(f"[WARN] Cached user client for {user_id} is stale/broken: {e}")
+            # Remove stale client from cache
+            try:
+                await uc.stop()
+            except Exception:
+                pass
+            ACTIVE_CLIENTS.pop(user_id, None)
 
+    # Create fresh client from saved session
     session_str = await get_session(user_id)
     if not session_str:
         return None
@@ -80,10 +91,12 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
             in_memory=True
         )
         await user_client.start()
+        # Validate new client works
+        await user_client.get_me()
         ACTIVE_CLIENTS[user_id] = user_client
         return user_client
     except Exception as e:
-        print(f"Error starting user client for {user_id}: {e}")
+        print(f"[ERROR] Failed to start user client for {user_id}: {e}")
         return None
 
 async def process_and_send_message(bot: Client, user_id: int, source_msg: Message, target_chat_id: int, status_msg: Message, is_cancelled=None, task_id=None):

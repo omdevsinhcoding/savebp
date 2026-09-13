@@ -110,7 +110,7 @@ async def batch_range_command(client: Client, message: Message):
                         except:
                             pass
             except Exception as e:
-                print(f"Skipping post {current_id}: {e}")
+                print(f"[WARN] Batch skip post {current_id} in chat {chat_id1} (topic={expected_topic}): {e}")
 
         if not is_cancelled():
             await status.edit_text("✅ **Batch Completed!**")

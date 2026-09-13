@@ -1,4 +1,4 @@
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from database.db import register_user
 from config import JOIN_LINK, ADMIN_CONTACT
@@ -36,7 +36,7 @@ async def start_handler(client: Client, message: Message):
         ]
     ])
 
-    reply_msg = await message.reply_text(text, reply_markup=buttons, reply_to_message_id=message.id)
+    reply_msg = await message.reply_text(text, reply_markup=buttons, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
     protect_message(message.chat.id, reply_msg.id)
 
 @Client.on_message(filters.command("stop") & filters.private)
@@ -228,7 +228,7 @@ async def back_to_start(client: Client, query: CallbackQuery):
     ])
 
     try:
-        await query.message.edit_text(text, reply_markup=buttons)
+        await query.message.edit_text(text, reply_markup=buttons, parse_mode=enums.ParseMode.HTML)
     except MessageNotModified:
         pass
 

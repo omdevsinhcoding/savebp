@@ -37,16 +37,25 @@ async def single_post_saver(client: Client, message: Message):
         if start_id == end_id:
             # Single Post
             source_msg = None
+            fetch_error = None
             try:
                 source_msg = await fetch_client.get_messages(chat_id, start_id)
-            except Exception:
+            except Exception as e:
+                fetch_error = e
+                print(f"[WARN] Primary fetch failed for {chat_id}/{start_id} (topic={expected_topic}): {e}")
                 if not is_private and not user_client:
                     user_client = await get_user_client(user_id, API_ID, API_HASH)
                     if user_client:
-                        source_msg = await user_client.get_messages(chat_id, start_id)
+                        try:
+                            source_msg = await user_client.get_messages(chat_id, start_id)
+                            fetch_error = None
+                        except Exception as e2:
+                            fetch_error = e2
+                            print(f"[WARN] Fallback fetch also failed for {chat_id}/{start_id}: {e2}")
 
             if not source_msg or getattr(source_msg, "empty", False) or (not source_msg.text and not source_msg.media):
-                return await status.edit_text("❌ **Could not fetch message!** Make sure link is correct and bot/user has access.")
+                err_detail = f"\n\n`Error: {fetch_error}`" if fetch_error else ""
+                return await status.edit_text(f"❌ **Could not fetch message!** Make sure link is correct and bot/user has access.{err_detail}")
 
             from plugins.batch import BATCH_CANCEL_FLAGS
             BATCH_CANCEL_FLAGS[user_id] = False
@@ -107,10 +116,11 @@ async def single_post_saver(client: Client, message: Message):
                             except:
                                 pass
                 except Exception as e:
-                    print(f"Skipping post {current_id}: {e}")
+                    print(f"[WARN] Range skip post {current_id} in chat {chat_id} (topic={expected_topic}): {e}")
 
             if not is_cancelled():
                 await status.edit_text("✅ **Batch Completed!**")
 
     except Exception as e:
+        print(f"[ERROR] Saver error for user {user_id}, link={link}: {e}")
         await status.edit_text(f"❌ **Error:** `{e}`")

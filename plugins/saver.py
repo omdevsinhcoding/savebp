@@ -27,14 +27,15 @@ async def single_post_saver(client: Client, message: Message):
     try:
         user_client = await get_user_client(user_id, API_ID, API_HASH)
         if is_private and not user_client:
-            # Check if session exists but is broken vs never existed
+            # Check if session still exists in DB (version mismatch) vs truly deleted (expired)
             from database.db import get_session as _check_session
             has_session = await _check_session(user_id)
             if has_session:
+                # Session exists but can't be used by this Pyrogram version
                 return await status.edit_text(
-                    "❌ **Session Expired / Revoked!**\n\n"
-                    "Your saved session is no longer valid.\n"
-                    "Please use `/login` to reconnect your account."
+                    "⚠️ **Session Cannot Be Used Here!**\n\n"
+                    "Your session is saved but this bot instance cannot use it.\n"
+                    "Use `/logout` then `/login` to create a fresh session."
                 )
             else:
                 return await status.edit_text(

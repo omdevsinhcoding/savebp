@@ -2,8 +2,10 @@ import asyncio
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message
 from pyrogram.errors import (
-    ApiIdInvalid, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded, PasswordHashInvalid,
-    AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan, SessionRevoked, SessionExpired
+    ApiIdInvalid, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired,
+    SessionPasswordNeeded, PasswordHashInvalid, FloodWait,
+    AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan,
+    SessionRevoked, SessionExpired
 )
 from database.db import save_session, get_session, delete_session
 from config import API_ID, API_HASH
@@ -16,8 +18,13 @@ LOGIN_STATES = {}
 
 async def validate_session(user_id: int) -> tuple:
     """
-    Actually connects to Telegram with the saved session to verify it works.
+    Validates a user session by actually connecting to Telegram.
     Returns (is_valid: bool, error_msg: str or None, user_info: str or None)
+    
+    Rules:
+    - If Telegram confirms session is dead (AuthKeyUnregistered, etc.) → delete from DB, return expired
+    - If it's a local parsing error (struct/unpack) → session IS valid, just can't verify locally → return active
+    - If it works → return active with user info
     """
     session_str = await get_session(user_id)
     if not session_str:
@@ -37,32 +44,34 @@ async def validate_session(user_id: int) -> tuple:
         user_info = f"{me.first_name} ({me.phone_number or 'N/A'})"
         await temp_client.stop()
         return True, None, user_info
+
     except (AuthKeyUnregistered, AuthKeyDuplicated, SessionRevoked, SessionExpired):
-        # Session was terminated/revoked from Telegram side
+        # ONLY these mean the session is truly dead on Telegram's side
         try:
             await temp_client.stop()
         except Exception:
             pass
         await delete_session(user_id)
-        # Also clear from active clients cache
-        try:
-            from helpers.downloader import ACTIVE_CLIENTS
-            if user_id in ACTIVE_CLIENTS:
-                try:
-                    await ACTIVE_CLIENTS[user_id].stop()
-                except Exception:
-                    pass
-                ACTIVE_CLIENTS.pop(user_id, None)
-        except Exception:
-            pass
+        _clear_active_client(user_id)
         return False, "expired", None
+
     except (UserDeactivated, UserDeactivatedBan):
         try:
             await temp_client.stop()
         except Exception:
             pass
         await delete_session(user_id)
+        _clear_active_client(user_id)
         return False, "deactivated", None
+
+    except FloodWait as e:
+        try:
+            await temp_client.stop()
+        except Exception:
+            pass
+        # Session exists and Telegram is rate-limiting us — session IS valid
+        return True, None, "(verified — rate limited)"
+
     except Exception as e:
         try:
             await temp_client.stop()
@@ -70,15 +79,30 @@ async def validate_session(user_id: int) -> tuple:
             pass
         error_str = str(e).lower()
         print(f"[WARN] Session validation error for {user_id}: {e}")
-        # Check if it's a Pyrogram version mismatch (NOT a real session problem)
-        is_version_mismatch = ("unpack" in error_str and "buffer" in error_str) or \
-                              "not enough values to unpack" in error_str
-        if is_version_mismatch:
-            # Session is valid in DB but this Pyrogram version can't parse it
-            # DO NOT delete from DB — it works on the other platform
-            print(f"[WARN] Pyrogram version mismatch for {user_id} — session NOT deleted")
-            return False, "version_mismatch", None
+
+        # struct/unpack errors = Pyrogram version mismatch. Session IS valid in DB.
+        # DO NOT delete. Treat as ACTIVE.
+        if ("unpack" in error_str and "buffer" in error_str) or \
+           "not enough values to unpack" in error_str:
+            print(f"[INFO] Version mismatch for {user_id} — session treated as ACTIVE (not deleted)")
+            return True, None, "(saved in database)"
+
+        # Any other unknown error — don't delete, report as-is
         return False, f"error: {e}", None
+
+
+def _clear_active_client(user_id):
+    """Clear user from active clients cache."""
+    try:
+        from helpers.downloader import ACTIVE_CLIENTS
+        if user_id in ACTIVE_CLIENTS:
+            try:
+                # Can't await here, just remove
+                ACTIVE_CLIENTS.pop(user_id, None)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 @Client.on_message(filters.command("login") & filters.private)
@@ -89,7 +113,7 @@ async def login_handler(client: Client, message: Message):
     existing_session = await get_session(user_id)
 
     if existing_session:
-        # Actually validate the session instead of blindly saying "active"
+        # Validate the session with Telegram
         status_msg = await message.reply_text("🔄 **Checking your session...**")
         is_valid, error, user_info = await validate_session(user_id)
 
@@ -101,42 +125,34 @@ async def login_handler(client: Client, message: Message):
                 f"You can save restricted content. Use `/logout` first if you want to re-login."
             )
             protect_message(message.chat.id, status_msg.id)
+            return
+
+        # Session is truly dead — auto-clear and start fresh login
+        if error == "expired":
+            await status_msg.edit_text(
+                "❌ **Session Expired / Revoked!**\n\n"
+                "> Your session was terminated from Telegram side.\n"
+                "> This happens when you revoke it manually:\n"
+                "> **Telegram → Settings → Privacy & Security → Active Sessions**\n\n"
+                "Session cleared. Starting fresh login...\n\n"
+                "📱 Please send your phone number in international format:\n"
+                "Example: `+919876543210`"
+            )
+            LOGIN_STATES[user_id] = {"step": "PHONE"}
+        elif error == "deactivated":
+            await status_msg.edit_text(
+                "❌ **Account Deactivated!**\n\n"
+                "> Your Telegram account has been deactivated or banned.\n"
+                "> Session has been cleared."
+            )
         else:
-            # Session is expired/revoked — auto-clear and start fresh login
-            if error == "expired":
-                await status_msg.edit_text(
-                    "❌ **Session Expired / Revoked!**\n\n"
-                    "> Your session was terminated from Telegram side.\n"
-                    "> This happens when you revoke it manually:\n"
-                    "> **Telegram → Settings → Privacy & Security → Active Sessions**\n\n"
-                    "Session cleared. Starting fresh login...\n\n"
-                    "📱 Please send your phone number in international format:\n"
-                    "Example: `+919876543210`"
-                )
-            elif error == "deactivated":
-                await status_msg.edit_text(
-                    "❌ **Account Deactivated!**\n\n"
-                    "> Your Telegram account has been deactivated or banned.\n"
-                    "> Session has been cleared."
-                )
-                return
-            elif error == "version_mismatch":
-                await status_msg.edit_text(
-                    "✅ **Session Exists in Database!**\n\n"
-                    "> Your session is saved and working on the VPS.\n"
-                    "> It cannot be verified from this device due to Pyrogram version difference.\n\n"
-                    "No action needed — your session is safe."
-                )
-                return
-            else:
-                await status_msg.edit_text(
-                    f"❌ **Session Invalid!**\n\n"
-                    f"> Error: `{error}`\n\n"
-                    "Session cleared. Starting fresh login...\n\n"
-                    "📱 Please send your phone number in international format:\n"
-                    "Example: `+919876543210`"
-                )
-            # Start fresh login flow
+            await status_msg.edit_text(
+                f"❌ **Session Invalid!**\n\n"
+                f"> Error: `{error}`\n\n"
+                "Session cleared. Starting fresh login...\n\n"
+                "📱 Please send your phone number in international format:\n"
+                "Example: `+919876543210`"
+            )
             LOGIN_STATES[user_id] = {"step": "PHONE"}
         return
 
@@ -157,53 +173,44 @@ async def check_handler(client: Client, message: Message):
         await message.reply_text("❌ **No Active Session!** Please use `/login` to connect your account.")
         return
 
-    # Actually validate the session by connecting to Telegram
+    # Validate the session with Telegram
     status_msg = await message.reply_text("🔄 **Verifying session with Telegram...**")
     is_valid, error, user_info = await validate_session(user_id)
 
     if is_valid:
-        check_msg_text = (
+        await status_msg.edit_text(
             f"✅ **Session Active!**\n\n"
             f"> **Account:** `{user_info}`\n"
             f"> **Status:** Connected & Working\n"
             f"> **You can save restricted content.**"
         )
-        await status_msg.edit_text(check_msg_text)
         protect_message(message.chat.id, status_msg.id)
+    elif error == "expired":
+        await status_msg.edit_text(
+            "❌ **Session Expired / Revoked!**\n\n"
+            "> Your session was terminated from Telegram side.\n"
+            "> This happens when you revoke it manually:\n"
+            "> **Telegram → Settings → Privacy & Security → Active Sessions**\n\n"
+            "Session cleared. Send `/login` to reconnect."
+        )
+    elif error == "deactivated":
+        await status_msg.edit_text(
+            "❌ **Account Deactivated!**\n\n"
+            "> Your Telegram account has been deactivated or banned.\n"
+            "> Session has been cleared."
+        )
     else:
-        if error == "expired":
-            await status_msg.edit_text(
-                "❌ **Session Expired / Revoked!**\n\n"
-                "> Your session was terminated from Telegram side.\n"
-                "> This happens when you revoke it manually:\n"
-                "> **Telegram → Settings → Privacy & Security → Active Sessions**\n\n"
-                "Session cleared. Send `/login` to reconnect."
-            )
-        elif error == "deactivated":
-            await status_msg.edit_text(
-                "❌ **Account Deactivated!**\n\n"
-                "> Your Telegram account has been deactivated or banned.\n"
-                "> Session has been cleared."
-            )
-        elif error == "version_mismatch":
-            await status_msg.edit_text(
-                "✅ **Session Exists in Database!**\n\n"
-                "> Your session is saved and working on the VPS.\n"
-                "> It cannot be verified from this device due to Pyrogram version difference.\n\n"
-                "No action needed — your session is safe."
-            )
-        else:
-            await status_msg.edit_text(
-                f"❌ **Session Invalid!**\n\n"
-                f"> Error: `{error}`\n\n"
-                "Session cleared. Send `/login` to reconnect."
-            )
+        await status_msg.edit_text(
+            f"❌ **Session Invalid!**\n\n"
+            f"> Error: `{error}`\n\n"
+            "Session cleared. Send `/login` to reconnect."
+        )
 
 @Client.on_message(filters.command("logout") & filters.private)
 async def logout_handler(client: Client, message: Message):
     await auto_clean_chat(client, message)
     user_id = message.from_user.id
-    # Also clear from active clients cache
+    # Clear from active clients cache
     try:
         from helpers.downloader import ACTIVE_CLIENTS
         if user_id in ACTIVE_CLIENTS:
@@ -245,6 +252,13 @@ async def login_step_listener(client: Client, message: Message):
                 "Please enter the OTP code sent to your Telegram app.\n"
                 "Format: Enter numbers separated by spaces (e.g. `1 2 3 4 5`) so Telegram doesn't auto-read it."
             )
+        except FloodWait as e:
+            await temp_client.disconnect()
+            del LOGIN_STATES[user_id]
+            await message.reply_text(
+                f"⏳ **Rate Limited!**\n\n"
+                f"Telegram is rate limiting. Please wait **{e.value} seconds** before trying again."
+            )
         except Exception as e:
             await temp_client.disconnect()
             del LOGIN_STATES[user_id]
@@ -274,6 +288,17 @@ async def login_step_listener(client: Client, message: Message):
         except SessionPasswordNeeded:
             LOGIN_STATES[user_id]["step"] = "2FA"
             await message.reply_text("🔐 **Two-Factor Authentication (2FA) Required!**\nPlease enter your Two-Step Verification Password:")
+        except FloodWait as e:
+            await message.reply_text(
+                f"⏳ **Rate Limited!**\n\n"
+                f"Please wait **{e.value} seconds** before trying again.\n"
+                f"Then use `/login` to restart."
+            )
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            del LOGIN_STATES[user_id]
         except (PhoneCodeInvalid, PhoneCodeExpired) as e:
             await message.reply_text(f"❌ **Invalid/Expired OTP:** `{e}`. Please try entering again:")
         except Exception as e:
@@ -301,6 +326,17 @@ async def login_step_listener(client: Client, message: Message):
             protect_message(message.chat.id, success_msg.id)
         except PasswordHashInvalid:
             await message.reply_text("❌ **Incorrect 2FA Password!** Please enter password again:")
+        except FloodWait as e:
+            await message.reply_text(
+                f"⏳ **Rate Limited!**\n\n"
+                f"Please wait **{e.value} seconds** before trying again.\n"
+                f"Then use `/login` to restart."
+            )
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            del LOGIN_STATES[user_id]
         except Exception as e:
             await temp_client.disconnect()
             del LOGIN_STATES[user_id]

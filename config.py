@@ -34,8 +34,8 @@ LOG_GROUP    = int(os.getenv("LOG_GROUP", "0"))
 FORCE_SUB    = int(os.getenv("FORCE_SUB", "0"))
 
 # ─── SECURITY KEYS ──────────────────────────────────────────────────────────────
-MASTER_KEY   = os.getenv("MASTER_KEY", "gK8HzLfT9QpViJcYeB5wRa3DmN7P2xUq")  # session encryption
-IV_KEY       = os.getenv("IV_KEY", "s7Yx5CpVmE3F")  # decryption key
+MASTER_KEY   = os.getenv("MASTER_KEY", "gK8HzLfT9QpViJvvcYeB5wRa3DmN7P2xUcq")  # session encryption
+IV_KEY       = os.getenv("IV_KEY", "s7Yx5CpcccVmE3rF")  # decryption key
 
 # ─── COOKIES HANDLING ───────────────────────────────────────────────────────────
 YT_COOKIES   = os.getenv("YT_COOKIES", YTUB_COOKIES)

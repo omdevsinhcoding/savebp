@@ -109,11 +109,10 @@ async def single_post_saver(client: Client, message: Message):
                     if getattr(source_msg, "empty", False) or (not source_msg.text and not source_msg.media):
                         continue
                     
-                    # Strict topic filtering — ONLY process messages from the expected topic
+                    # Topic filtering — only skip if we KNOW it's in a different topic
                     if expected_topic:
                         msg_thread = getattr(source_msg, 'message_thread_id', None)
-                        if not msg_thread or msg_thread != expected_topic:
-                            # This message is NOT in the expected topic, skip it
+                        if msg_thread is not None and msg_thread != expected_topic:
                             continue
 
                     if source_msg and not source_msg.empty:

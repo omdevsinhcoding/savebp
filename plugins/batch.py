@@ -89,10 +89,10 @@ async def batch_range_command(client: Client, message: Message):
                 if getattr(msg, "empty", False) or (not msg.text and not msg.media):
                     continue
                 
-                # Strict topic filtering — ONLY process messages from the expected topic
+                # Topic filtering — only skip if we KNOW it's in a different topic
                 if expected_topic:
                     msg_thread = getattr(msg, 'message_thread_id', None)
-                    if not msg_thread or msg_thread != expected_topic:
+                    if msg_thread is not None and msg_thread != expected_topic:
                         continue
 
                 if msg and not msg.empty:

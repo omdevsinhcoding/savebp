@@ -68,7 +68,21 @@ async def validate_session(user_id: int) -> tuple:
             await temp_client.stop()
         except Exception:
             pass
+        error_str = str(e).lower()
         print(f"[WARN] Session validation error for {user_id}: {e}")
+        # Check if session data is corrupt (struct unpack errors, etc.)
+        is_corrupt = ("unpack" in error_str and "buffer" in error_str) or \
+                     "invalid session" in error_str or \
+                     "not enough values to unpack" in error_str
+        if is_corrupt:
+            print(f"[INFO] Auto-clearing corrupt session for {user_id}")
+            await delete_session(user_id)
+            try:
+                from helpers.downloader import ACTIVE_CLIENTS
+                ACTIVE_CLIENTS.pop(user_id, None)
+            except Exception:
+                pass
+            return False, "corrupt", None
         return False, f"error: {e}", None
 
 
@@ -111,6 +125,15 @@ async def login_handler(client: Client, message: Message):
                     "> Session has been cleared."
                 )
                 return
+            elif error == "corrupt":
+                await status_msg.edit_text(
+                    "❌ **Session Data Corrupted!**\n\n"
+                    "> Your saved session string is corrupted or incompatible.\n"
+                    "> Session has been cleared.\n\n"
+                    "Starting fresh login...\n\n"
+                    "📱 Please send your phone number in international format:\n"
+                    "Example: `+919876543210`"
+                )
             else:
                 await status_msg.edit_text(
                     f"❌ **Session Invalid!**\n\n"
@@ -167,6 +190,13 @@ async def check_handler(client: Client, message: Message):
                 "❌ **Account Deactivated!**\n\n"
                 "> Your Telegram account has been deactivated or banned.\n"
                 "> Session has been cleared."
+            )
+        elif error == "corrupt":
+            await status_msg.edit_text(
+                "❌ **Session Data Corrupted!**\n\n"
+                "> Your saved session string is corrupted or incompatible.\n"
+                "> Session has been auto-cleared.\n\n"
+                "Send `/login` to reconnect."
             )
         else:
             await status_msg.edit_text(

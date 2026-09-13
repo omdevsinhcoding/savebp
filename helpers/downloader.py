@@ -65,10 +65,34 @@ SESSION_DEAD_ERRORS = (
     "SessionExpired", "UserDeactivated", "UserDeactivatedBan"
 )
 
+# Error strings in the message that indicate corrupt/broken session data
+SESSION_CORRUPT_KEYWORDS = (
+    "unpack requires a buffer",
+    "unpack_from requires a buffer",
+    "session string is invalid",
+    "invalid session",
+    "not enough values to unpack",
+)
+
 def _is_session_dead(error: Exception) -> bool:
-    """Check if an error indicates the session is permanently invalid."""
+    """Check if an error indicates the session is permanently invalid (revoked/expired by Telegram)."""
     error_name = type(error).__name__
     return error_name in SESSION_DEAD_ERRORS
+
+def _is_session_corrupt(error: Exception) -> bool:
+    """Check if an error indicates the session string data is corrupt/unparseable."""
+    error_name = type(error).__name__
+    error_str = str(error).lower()
+    # struct.error from corrupt session data
+    if error_name == "error" and "unpack" in error_str:
+        return True
+    if error_name == "struct_error":
+        return True
+    # Check for known corrupt session keywords
+    for keyword in SESSION_CORRUPT_KEYWORDS:
+        if keyword in error_str:
+            return True
+    return False
 
 async def get_user_client(user_id: int, api_id: int, api_hash: str):
     # Try cached client first
@@ -88,9 +112,9 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
             except Exception:
                 pass
             ACTIVE_CLIENTS.pop(user_id, None)
-            # If session is permanently dead, auto-delete from DB
-            if _is_session_dead(e):
-                print(f"[INFO] Auto-clearing expired session for {user_id}")
+            # If session is permanently dead or corrupt, auto-delete from DB
+            if _is_session_dead(e) or _is_session_corrupt(e):
+                print(f"[INFO] Auto-clearing dead/corrupt session for {user_id}")
                 await delete_session(user_id)
                 return None
 
@@ -113,9 +137,9 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
         return user_client
     except Exception as e:
         print(f"[ERROR] Failed to start user client for {user_id}: {e}")
-        # If session is permanently dead, auto-delete from DB
-        if _is_session_dead(e):
-            print(f"[INFO] Auto-clearing expired session for {user_id}")
+        # If session is permanently dead or corrupt, auto-delete from DB
+        if _is_session_dead(e) or _is_session_corrupt(e):
+            print(f"[INFO] Auto-clearing dead/corrupt session for {user_id}")
             await delete_session(user_id)
         return None
 

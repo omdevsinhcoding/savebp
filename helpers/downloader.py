@@ -59,19 +59,12 @@ def parse_tg_link(link: str):
 
 ACTIVE_CLIENTS = {}
 
-# Session-expired error types that mean the session is permanently dead
+# Session-expired error types that mean the session is permanently dead ON TELEGRAM'S SIDE.
+# ONLY these should trigger auto-deletion from DB.
+# struct/unpack errors are NOT included — those are Pyrogram version mismatches, not real corruption.
 SESSION_DEAD_ERRORS = (
     "AuthKeyUnregistered", "AuthKeyDuplicated", "SessionRevoked",
     "SessionExpired", "UserDeactivated", "UserDeactivatedBan"
-)
-
-# Error strings in the message that indicate corrupt/broken session data
-SESSION_CORRUPT_KEYWORDS = (
-    "unpack requires a buffer",
-    "unpack_from requires a buffer",
-    "session string is invalid",
-    "invalid session",
-    "not enough values to unpack",
 )
 
 def _is_session_dead(error: Exception) -> bool:
@@ -79,20 +72,11 @@ def _is_session_dead(error: Exception) -> bool:
     error_name = type(error).__name__
     return error_name in SESSION_DEAD_ERRORS
 
-def _is_session_corrupt(error: Exception) -> bool:
-    """Check if an error indicates the session string data is corrupt/unparseable."""
-    error_name = type(error).__name__
+def _is_version_mismatch(error: Exception) -> bool:
+    """Check if error is due to Pyrogram version mismatch (NOT a real session problem)."""
     error_str = str(error).lower()
-    # struct.error from corrupt session data
-    if error_name == "error" and "unpack" in error_str:
-        return True
-    if error_name == "struct_error":
-        return True
-    # Check for known corrupt session keywords
-    for keyword in SESSION_CORRUPT_KEYWORDS:
-        if keyword in error_str:
-            return True
-    return False
+    return ("unpack" in error_str and "buffer" in error_str) or \
+           "not enough values to unpack" in error_str
 
 async def get_user_client(user_id: int, api_id: int, api_hash: str):
     # Try cached client first
@@ -112,10 +96,13 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
             except Exception:
                 pass
             ACTIVE_CLIENTS.pop(user_id, None)
-            # If session is permanently dead or corrupt, auto-delete from DB
-            if _is_session_dead(e) or _is_session_corrupt(e):
-                print(f"[INFO] Auto-clearing dead/corrupt session for {user_id}")
+            # ONLY delete from DB if Telegram confirmed the session is dead
+            if _is_session_dead(e):
+                print(f"[INFO] Auto-clearing expired session for {user_id} (Telegram confirmed)")
                 await delete_session(user_id)
+                return None
+            if _is_version_mismatch(e):
+                print(f"[WARN] Pyrogram version mismatch for {user_id} — session NOT deleted from DB")
                 return None
 
     # Create fresh client from saved session
@@ -137,11 +124,66 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
         return user_client
     except Exception as e:
         print(f"[ERROR] Failed to start user client for {user_id}: {e}")
-        # If session is permanently dead or corrupt, auto-delete from DB
-        if _is_session_dead(e) or _is_session_corrupt(e):
-            print(f"[INFO] Auto-clearing dead/corrupt session for {user_id}")
+        # ONLY delete from DB if Telegram confirmed the session is dead
+        if _is_session_dead(e):
+            print(f"[INFO] Auto-clearing expired session for {user_id} (Telegram confirmed)")
             await delete_session(user_id)
+        elif _is_version_mismatch(e):
+            print(f"[WARN] Pyrogram version mismatch for {user_id} — session NOT deleted from DB")
         return None
+
+
+async def _resolve_peer_safe(bot: Client, chat_id):
+    """Try to resolve a chat peer so the bot knows about it before sending."""
+    try:
+        await bot.get_chat(chat_id)
+        return True
+    except Exception as e:
+        print(f"[WARN] Could not resolve peer {chat_id}: {e}")
+        return False
+
+async def _send_media(bot: Client, dest_chat, source_msg, file_path, kwargs, topic_id, final_caption):
+    """Send media with fallback for Pyrogram versions that don't support message_thread_id."""
+    send_kwargs = dict(kwargs)  # copy so we don't mutate
+    
+    async def _try_send(chat, kw):
+        if source_msg.photo:
+            return await bot.send_photo(chat, photo=file_path, **kw)
+        elif source_msg.video:
+            return await bot.send_video(chat, video=file_path, **kw)
+        elif source_msg.audio:
+            return await bot.send_audio(chat, audio=file_path, **kw)
+        elif source_msg.document:
+            return await bot.send_document(chat, document=file_path, **kw)
+        else:
+            copy_kw = {"caption": final_caption}
+            if "message_thread_id" in kw:
+                copy_kw["message_thread_id"] = kw["message_thread_id"]
+            return await bot.copy_message(chat, source_msg.chat.id, source_msg.id, **copy_kw)
+
+    try:
+        return await _try_send(dest_chat, send_kwargs)
+    except TypeError as e:
+        # Pyrogram version doesn't support message_thread_id — retry without it
+        if "message_thread_id" in str(e) and "message_thread_id" in send_kwargs:
+            print(f"[WARN] message_thread_id not supported, retrying without it")
+            send_kwargs.pop("message_thread_id", None)
+            return await _try_send(dest_chat, send_kwargs)
+        raise
+
+async def _copy_media(bot: Client, dest_chat, uploaded_msg, topic_id, final_caption):
+    """Copy an already-uploaded message to another destination."""
+    copy_kwargs = {"caption": final_caption}
+    if topic_id:
+        copy_kwargs["message_thread_id"] = topic_id
+    try:
+        await bot.copy_message(dest_chat, uploaded_msg.chat.id, uploaded_msg.id, **copy_kwargs)
+    except TypeError as e:
+        if "message_thread_id" in str(e):
+            copy_kwargs.pop("message_thread_id", None)
+            await bot.copy_message(dest_chat, uploaded_msg.chat.id, uploaded_msg.id, **copy_kwargs)
+        else:
+            raise
 
 async def process_and_send_message(bot: Client, user_id: int, source_msg: Message, target_chat_id: int, status_msg: Message, is_cancelled=None, task_id=None):
     if getattr(source_msg, "empty", False) or (not source_msg.text and not source_msg.media):
@@ -173,10 +215,19 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
                 print(f"Error parsing set_upload_data: {e}")
 
     if custom_chat_id:
-        targets.append((custom_chat_id, thread_id))
+        # Resolve the custom upload chat so the bot knows about it
+        resolved = await _resolve_peer_safe(bot, custom_chat_id)
+        if resolved:
+            targets.append((custom_chat_id, thread_id))
+        else:
+            print(f"[WARN] Skipping custom upload to {custom_chat_id} — peer not resolved (bot may not be a member)")
         if send_pm == "On":
             targets.append((target_chat_id, None))
     else:
+        targets.append((target_chat_id, None))
+
+    # If no targets resolved, at least send to user PM
+    if not targets:
         targets.append((target_chat_id, None))
 
     # Calculate caption
@@ -196,6 +247,11 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
                 progress=tracker.progress_callback
             )
 
+            # Check download succeeded
+            if not file_path or not os.path.exists(file_path):
+                print(f"[ERROR] Download failed or file not found for user {user_id}")
+                return
+
             upload_tracker = ProgressTracker(status_msg, action_text="📤 Uploading Media", user_id=user_id, is_cancelled=is_cancelled)
             user_thumb = settings.get("thumbnail_id")
             if user_thumb and not os.path.exists(user_thumb):
@@ -211,53 +267,33 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
 
                 try:
                     if uploaded_msg:
-                        copy_kwargs = {"caption": final_caption}
-                        if topic_id:
-                            copy_kwargs["message_thread_id"] = topic_id
-                        await bot.copy_message(dest_chat, uploaded_msg.chat.id, uploaded_msg.id, **copy_kwargs)
+                        await _copy_media(bot, dest_chat, uploaded_msg, topic_id, final_caption)
                         continue
 
-                    if source_msg.photo:
-                        uploaded_msg = await bot.send_photo(dest_chat, photo=file_path, **kwargs)
-                    elif source_msg.video:
-                        uploaded_msg = await bot.send_video(dest_chat, video=file_path, **kwargs)
-                    elif source_msg.audio:
-                        uploaded_msg = await bot.send_audio(dest_chat, audio=file_path, **kwargs)
-                    elif source_msg.document:
-                        uploaded_msg = await bot.send_document(dest_chat, document=file_path, **kwargs)
-                    else:
-                        copy_kwargs = {"caption": final_caption}
-                        if topic_id:
-                            copy_kwargs["message_thread_id"] = topic_id
-                        uploaded_msg = await bot.copy_message(dest_chat, source_msg.chat.id, source_msg.id, **copy_kwargs)
+                    uploaded_msg = await _send_media(bot, dest_chat, source_msg, file_path, kwargs, topic_id, final_caption)
                 except Exception as e:
-                    if "PEER_ID_INVALID" in str(e) and str(dest_chat).startswith("-") and not str(dest_chat).startswith("-100"):
-                        new_dest = int(f"-100{str(dest_chat)[1:]}")
+                    error_str = str(e)
+                    # Try with -100 prefix fix for supergroups
+                    if "PEER_ID_INVALID" in error_str or "Peer id invalid" in error_str:
+                        dest_str = str(dest_chat)
+                        if dest_str.startswith("-") and not dest_str.startswith("-100"):
+                            new_dest = int(f"-100{dest_str[1:]}")
+                        elif not dest_str.startswith("-"):
+                            new_dest = int(f"-100{dest_str}")
+                        else:
+                            print(f"[ERROR] Cannot resolve peer {dest_chat}: {e}")
+                            continue
+                        
                         try:
+                            await _resolve_peer_safe(bot, new_dest)
                             if uploaded_msg:
-                                copy_kwargs = {"caption": final_caption}
-                                if topic_id:
-                                    copy_kwargs["message_thread_id"] = topic_id
-                                await bot.copy_message(new_dest, uploaded_msg.chat.id, uploaded_msg.id, **copy_kwargs)
-                                continue
-
-                            if source_msg.photo:
-                                uploaded_msg = await bot.send_photo(new_dest, photo=file_path, **kwargs)
-                            elif source_msg.video:
-                                uploaded_msg = await bot.send_video(new_dest, video=file_path, **kwargs)
-                            elif source_msg.audio:
-                                uploaded_msg = await bot.send_audio(new_dest, audio=file_path, **kwargs)
-                            elif source_msg.document:
-                                uploaded_msg = await bot.send_document(new_dest, document=file_path, **kwargs)
+                                await _copy_media(bot, new_dest, uploaded_msg, topic_id, final_caption)
                             else:
-                                copy_kwargs = {"caption": final_caption}
-                                if topic_id:
-                                    copy_kwargs["message_thread_id"] = topic_id
-                                uploaded_msg = await bot.copy_message(new_dest, source_msg.chat.id, source_msg.id, **copy_kwargs)
+                                uploaded_msg = await _send_media(bot, new_dest, source_msg, file_path, kwargs, topic_id, final_caption)
                         except Exception as e2:
-                            print(f"Failed uploading media to fallback ID {new_dest}: {e2}")
+                            print(f"[ERROR] Failed uploading media to fallback {new_dest}: {e2}")
                     else:
-                        print(f"Failed uploading media to {dest_chat}: {e}")
+                        print(f"[ERROR] Failed uploading media to {dest_chat}: {e}")
 
         finally:
             if file_path and os.path.exists(file_path):
@@ -266,17 +302,48 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
         # Text message
         for dest_chat, topic_id in targets:
             try:
+                # Resolve peer for custom upload chats
+                if dest_chat != target_chat_id:
+                    await _resolve_peer_safe(bot, dest_chat)
+                
                 kwargs = {}
                 if topic_id:
                     kwargs["message_thread_id"] = topic_id
-                await bot.send_message(dest_chat, text=final_caption or source_msg.text, **kwargs)
+                try:
+                    await bot.send_message(dest_chat, text=final_caption or source_msg.text, **kwargs)
+                except TypeError as e:
+                    if "message_thread_id" in str(e):
+                        kwargs.pop("message_thread_id", None)
+                        await bot.send_message(dest_chat, text=final_caption or source_msg.text, **kwargs)
+                    else:
+                        raise
             except Exception as e:
-                if "PEER_ID_INVALID" in str(e) and str(dest_chat).startswith("-") and not str(dest_chat).startswith("-100"):
-                    new_dest = int(f"-100{str(dest_chat)[1:]}")
+                error_str = str(e)
+                if "PEER_ID_INVALID" in error_str or "Peer id invalid" in error_str:
+                    dest_str = str(dest_chat)
+                    if dest_str.startswith("-") and not dest_str.startswith("-100"):
+                        new_dest = int(f"-100{dest_str[1:]}")
+                    elif not dest_str.startswith("-"):
+                        new_dest = int(f"-100{dest_str}")
+                    else:
+                        print(f"[ERROR] Cannot resolve text peer {dest_chat}: {e}")
+                        continue
                     try:
-                        await bot.send_message(new_dest, text=final_caption or source_msg.text, **kwargs)
+                        await _resolve_peer_safe(bot, new_dest)
+                        send_kwargs = {}
+                        if topic_id:
+                            send_kwargs["message_thread_id"] = topic_id
+                        try:
+                            await bot.send_message(new_dest, text=final_caption or source_msg.text, **send_kwargs)
+                        except TypeError as te:
+                            if "message_thread_id" in str(te):
+                                send_kwargs.pop("message_thread_id", None)
+                                await bot.send_message(new_dest, text=final_caption or source_msg.text, **send_kwargs)
+                            else:
+                                raise
                     except Exception as e2:
-                        print(f"Failed sending text to fallback ID {new_dest}: {e2}")
+                        print(f"[ERROR] Failed sending text to fallback {new_dest}: {e2}")
                 else:
-                    print(f"Failed sending text to {dest_chat}: {e}")
+                    print(f"[ERROR] Failed sending text to {dest_chat}: {e}")
+
 

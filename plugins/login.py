@@ -2,7 +2,8 @@ import asyncio
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message
 from pyrogram.errors import (
-    ApiIdInvalid, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded, PasswordHashInvalid
+    ApiIdInvalid, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded, PasswordHashInvalid,
+    AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan, SessionRevoked, SessionExpired
 )
 from database.db import save_session, get_session, delete_session
 from config import API_ID, API_HASH
@@ -12,20 +13,114 @@ from helpers.cleaner import auto_clean_chat, protect_message
 # Active login sessions in-memory step state
 LOGIN_STATES = {}
 
+
+async def validate_session(user_id: int) -> tuple:
+    """
+    Actually connects to Telegram with the saved session to verify it works.
+    Returns (is_valid: bool, error_msg: str or None, user_info: str or None)
+    """
+    session_str = await get_session(user_id)
+    if not session_str:
+        return False, "no_session", None
+
+    temp_client = Client(
+        f"validate_{user_id}",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=session_str,
+        in_memory=True,
+        no_updates=True
+    )
+    try:
+        await temp_client.start()
+        me = await temp_client.get_me()
+        user_info = f"{me.first_name} ({me.phone_number or 'N/A'})"
+        await temp_client.stop()
+        return True, None, user_info
+    except (AuthKeyUnregistered, AuthKeyDuplicated, SessionRevoked, SessionExpired):
+        # Session was terminated/revoked from Telegram side
+        try:
+            await temp_client.stop()
+        except Exception:
+            pass
+        await delete_session(user_id)
+        # Also clear from active clients cache
+        try:
+            from helpers.downloader import ACTIVE_CLIENTS
+            if user_id in ACTIVE_CLIENTS:
+                try:
+                    await ACTIVE_CLIENTS[user_id].stop()
+                except Exception:
+                    pass
+                ACTIVE_CLIENTS.pop(user_id, None)
+        except Exception:
+            pass
+        return False, "expired", None
+    except (UserDeactivated, UserDeactivatedBan):
+        try:
+            await temp_client.stop()
+        except Exception:
+            pass
+        await delete_session(user_id)
+        return False, "deactivated", None
+    except Exception as e:
+        try:
+            await temp_client.stop()
+        except Exception:
+            pass
+        print(f"[WARN] Session validation error for {user_id}: {e}")
+        return False, f"error: {e}", None
+
+
 @Client.on_message(filters.command("login") & filters.private)
 async def login_handler(client: Client, message: Message):
     protect_message(message.chat.id, message.id)
     await auto_clean_chat(client, message)
     user_id = message.from_user.id
     existing_session = await get_session(user_id)
+
     if existing_session:
-        already_msg = await message.reply_text(
-            "✅ **Login Successful!**\n\n"
-            "> **Your account is now connected.**\n"
-            "> **You can save restricted content.**\n\n"
-            "Use `/check` to verify your session anytime."
-        )
-        protect_message(message.chat.id, already_msg.id)
+        # Actually validate the session instead of blindly saying "active"
+        status_msg = await message.reply_text("🔄 **Checking your session...**")
+        is_valid, error, user_info = await validate_session(user_id)
+
+        if is_valid:
+            await status_msg.edit_text(
+                f"✅ **Session Already Active!**\n\n"
+                f"> **Account:** `{user_info}`\n"
+                f"> **Status:** Connected & Working\n\n"
+                f"You can save restricted content. Use `/logout` first if you want to re-login."
+            )
+            protect_message(message.chat.id, status_msg.id)
+        else:
+            # Session is expired/revoked — auto-clear and start fresh login
+            if error == "expired":
+                await status_msg.edit_text(
+                    "❌ **Session Expired / Revoked!**\n\n"
+                    "> Your session was terminated from Telegram side.\n"
+                    "> This happens when you revoke it manually:\n"
+                    "> **Telegram → Settings → Privacy & Security → Active Sessions**\n\n"
+                    "Session cleared. Starting fresh login...\n\n"
+                    "📱 Please send your phone number in international format:\n"
+                    "Example: `+919876543210`"
+                )
+            elif error == "deactivated":
+                await status_msg.edit_text(
+                    "❌ **Account Deactivated!**\n\n"
+                    "> Your Telegram account has been deactivated or banned.\n"
+                    "> Session has been cleared."
+                )
+                return
+            else:
+                await status_msg.edit_text(
+                    f"❌ **Session Invalid!**\n\n"
+                    f"> Error: `{error}`\n\n"
+                    "Session cleared. Starting fresh login...\n\n"
+                    "📱 Please send your phone number in international format:\n"
+                    "Example: `+919876543210`"
+                )
+            # Start fresh login flow
+            LOGIN_STATES[user_id] = {"step": "PHONE"}
         return
 
     LOGIN_STATES[user_id] = {"step": "PHONE"}
@@ -40,20 +135,61 @@ async def check_handler(client: Client, message: Message):
     await auto_clean_chat(client, message)
     user_id = message.from_user.id
     session = await get_session(user_id)
-    if session:
-        check_msg = await message.reply_text(
-            "✅ **Session Active!**\n\n"
-            "> **Your account is connected.**\n"
-            "> **You can save restricted content.**"
-        )
-        protect_message(message.chat.id, check_msg.id)
-    else:
+
+    if not session:
         await message.reply_text("❌ **No Active Session!** Please use `/login` to connect your account.")
+        return
+
+    # Actually validate the session by connecting to Telegram
+    status_msg = await message.reply_text("🔄 **Verifying session with Telegram...**")
+    is_valid, error, user_info = await validate_session(user_id)
+
+    if is_valid:
+        check_msg_text = (
+            f"✅ **Session Active!**\n\n"
+            f"> **Account:** `{user_info}`\n"
+            f"> **Status:** Connected & Working\n"
+            f"> **You can save restricted content.**"
+        )
+        await status_msg.edit_text(check_msg_text)
+        protect_message(message.chat.id, status_msg.id)
+    else:
+        if error == "expired":
+            await status_msg.edit_text(
+                "❌ **Session Expired / Revoked!**\n\n"
+                "> Your session was terminated from Telegram side.\n"
+                "> This happens when you revoke it manually:\n"
+                "> **Telegram → Settings → Privacy & Security → Active Sessions**\n\n"
+                "Session cleared. Send `/login` to reconnect."
+            )
+        elif error == "deactivated":
+            await status_msg.edit_text(
+                "❌ **Account Deactivated!**\n\n"
+                "> Your Telegram account has been deactivated or banned.\n"
+                "> Session has been cleared."
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ **Session Invalid!**\n\n"
+                f"> Error: `{error}`\n\n"
+                "Session cleared. Send `/login` to reconnect."
+            )
 
 @Client.on_message(filters.command("logout") & filters.private)
 async def logout_handler(client: Client, message: Message):
     await auto_clean_chat(client, message)
     user_id = message.from_user.id
+    # Also clear from active clients cache
+    try:
+        from helpers.downloader import ACTIVE_CLIENTS
+        if user_id in ACTIVE_CLIENTS:
+            try:
+                await ACTIVE_CLIENTS[user_id].stop()
+            except Exception:
+                pass
+            ACTIVE_CLIENTS.pop(user_id, None)
+    except Exception:
+        pass
     await delete_session(user_id)
     if user_id in LOGIN_STATES:
         del LOGIN_STATES[user_id]

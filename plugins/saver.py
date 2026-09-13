@@ -27,10 +27,20 @@ async def single_post_saver(client: Client, message: Message):
     try:
         user_client = await get_user_client(user_id, API_ID, API_HASH)
         if is_private and not user_client:
-            return await status.edit_text(
-                "🔐 **Private Channel Link Detected!**\n\n"
-                "Please login to your account using `/login` to download content from private channels."
-            )
+            # Check if session exists but is broken vs never existed
+            from database.db import get_session as _check_session
+            has_session = await _check_session(user_id)
+            if has_session:
+                return await status.edit_text(
+                    "❌ **Session Expired / Revoked!**\n\n"
+                    "Your saved session is no longer valid.\n"
+                    "Please use `/login` to reconnect your account."
+                )
+            else:
+                return await status.edit_text(
+                    "🔐 **Private Channel Link Detected!**\n\n"
+                    "Please login to your account using `/login` to download content from private channels."
+                )
 
         fetch_client = user_client if user_client else client
 

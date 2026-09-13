@@ -4,7 +4,7 @@ import asyncio
 from pyrogram import Client
 from pyrogram.types import Message
 from helpers.progress import ProgressTracker
-from database.db import get_session, get_thumbnail, get_caption, get_replacements, get_user_settings
+from database.db import get_session, delete_session, get_thumbnail, get_caption, get_replacements, get_user_settings
 
 def parse_tg_link(link: str):
     """
@@ -59,6 +59,17 @@ def parse_tg_link(link: str):
 
 ACTIVE_CLIENTS = {}
 
+# Session-expired error types that mean the session is permanently dead
+SESSION_DEAD_ERRORS = (
+    "AuthKeyUnregistered", "AuthKeyDuplicated", "SessionRevoked",
+    "SessionExpired", "UserDeactivated", "UserDeactivatedBan"
+)
+
+def _is_session_dead(error: Exception) -> bool:
+    """Check if an error indicates the session is permanently invalid."""
+    error_name = type(error).__name__
+    return error_name in SESSION_DEAD_ERRORS
+
 async def get_user_client(user_id: int, api_id: int, api_hash: str):
     # Try cached client first
     if user_id in ACTIVE_CLIENTS:
@@ -77,6 +88,11 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
             except Exception:
                 pass
             ACTIVE_CLIENTS.pop(user_id, None)
+            # If session is permanently dead, auto-delete from DB
+            if _is_session_dead(e):
+                print(f"[INFO] Auto-clearing expired session for {user_id}")
+                await delete_session(user_id)
+                return None
 
     # Create fresh client from saved session
     session_str = await get_session(user_id)
@@ -97,6 +113,10 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
         return user_client
     except Exception as e:
         print(f"[ERROR] Failed to start user client for {user_id}: {e}")
+        # If session is permanently dead, auto-delete from DB
+        if _is_session_dead(e):
+            print(f"[INFO] Auto-clearing expired session for {user_id}")
+            await delete_session(user_id)
         return None
 
 async def process_and_send_message(bot: Client, user_id: int, source_msg: Message, target_chat_id: int, status_msg: Message, is_cancelled=None, task_id=None):

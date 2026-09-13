@@ -18,7 +18,7 @@ def get_connection():
             return _conn
     except Exception:
         pass
-    _conn = psycopg2.connect(DATABASE_URL)
+    _conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
     _conn.autocommit = False
     return _conn
 

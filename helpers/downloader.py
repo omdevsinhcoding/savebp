@@ -83,14 +83,13 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
     if user_id in ACTIVE_CLIENTS:
         uc = ACTIVE_CLIENTS[user_id]
         try:
-            if not uc.is_connected:
-                await uc.start()
-            # Validate the client is actually working with a lightweight call
-            await uc.get_me()
+            if uc.is_connected:
+                return uc
+            # Try to reconnect
+            await uc.start()
             return uc
         except Exception as e:
-            print(f"[WARN] Cached user client for {user_id} is stale/broken: {e}")
-            # Remove stale client from cache
+            print(f"[WARN] Cached user client for {user_id} is stale: {e}")
             try:
                 await uc.stop()
             except Exception:
@@ -101,36 +100,40 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
                 print(f"[INFO] Auto-clearing expired session for {user_id} (Telegram confirmed)")
                 await delete_session(user_id)
                 return None
-            if _is_version_mismatch(e):
-                print(f"[WARN] Pyrogram version mismatch for {user_id} — session NOT deleted from DB")
-                return None
 
-    # Create fresh client from saved session
+    # Create fresh client from saved session (with retry for transient errors)
     session_str = await get_session(user_id)
     if not session_str:
         return None
-    try:
-        user_client = Client(
-            f"user_{user_id}",
-            api_id=api_id,
-            api_hash=api_hash,
-            session_string=session_str,
-            in_memory=True
-        )
-        await user_client.start()
-        # Validate new client works
-        await user_client.get_me()
-        ACTIVE_CLIENTS[user_id] = user_client
-        return user_client
-    except Exception as e:
-        print(f"[ERROR] Failed to start user client for {user_id}: {e}")
-        # ONLY delete from DB if Telegram confirmed the session is dead
-        if _is_session_dead(e):
-            print(f"[INFO] Auto-clearing expired session for {user_id} (Telegram confirmed)")
-            await delete_session(user_id)
-        elif _is_version_mismatch(e):
-            print(f"[WARN] Pyrogram version mismatch for {user_id} — session NOT deleted from DB")
-        return None
+
+    max_retries = 3
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            user_client = Client(
+                f"user_{user_id}",
+                api_id=api_id,
+                api_hash=api_hash,
+                session_string=session_str,
+                in_memory=True,
+                no_updates=True
+            )
+            await user_client.start()
+            ACTIVE_CLIENTS[user_id] = user_client
+            return user_client
+        except Exception as e:
+            last_error = e
+            # If Telegram says session is dead, don't retry — delete and return
+            if _is_session_dead(e):
+                print(f"[INFO] Auto-clearing expired session for {user_id} (Telegram confirmed)")
+                await delete_session(user_id)
+                return None
+            print(f"[WARN] Attempt {attempt+1}/{max_retries} failed for user {user_id}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+
+    print(f"[ERROR] All {max_retries} attempts failed for user {user_id}: {last_error}")
+    return None
 
 
 async def _resolve_peer_safe(bot: Client, chat_id):

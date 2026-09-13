@@ -43,6 +43,10 @@ def dcs(ed):
         dec = cp.decryptor()
         res = dec.update(ct) + dec.finalize()
         return res.decode()
-    except Exception:
-        # Fallback in case existing strings are not encrypted
-        return ed
+    except Exception as e:
+        print(f"[ERROR] Session decryption failed! Check MASTER_KEY and IV_KEY match between environments: {e}")
+        # Try returning as-is ONLY if it looks like a valid Pyrogram session string (starts with 'B')
+        if isinstance(ed, str) and ed.startswith('B'):
+            return ed
+        return None
+

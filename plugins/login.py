@@ -22,73 +22,75 @@ async def validate_session(user_id: int) -> tuple:
     Returns (is_valid: bool, error_msg: str or None, user_info: str or None)
     
     Rules:
-    - If Telegram confirms session is dead (AuthKeyUnregistered, etc.) → delete from DB, return expired
-    - If it's a local parsing error (struct/unpack) → session IS valid, just can't verify locally → return active
-    - If it works → return active with user info
+    - If Telegram confirms session is dead → delete from DB, return expired
+    - If transient error (struct/unpack) → retry up to 3 times
+    - If all retries fail → trust DB, return active
     """
     session_str = await get_session(user_id)
     if not session_str:
         return False, "no_session", None
 
-    temp_client = Client(
-        f"validate_{user_id}",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=session_str,
-        in_memory=True,
-        no_updates=True
-    )
-    try:
-        await temp_client.start()
-        me = await temp_client.get_me()
-        user_info = f"{me.first_name} ({me.phone_number or 'N/A'})"
-        await temp_client.stop()
-        return True, None, user_info
+    max_retries = 3
+    last_error = None
 
-    except (AuthKeyUnregistered, AuthKeyDuplicated, SessionRevoked, SessionExpired):
-        # ONLY these mean the session is truly dead on Telegram's side
+    for attempt in range(max_retries):
+        temp_client = Client(
+            f"validate_{user_id}_{attempt}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_str,
+            in_memory=True,
+            no_updates=True
+        )
         try:
+            await temp_client.start()
+            me = await temp_client.get_me()
+            user_info = f"{me.first_name} ({me.phone_number or 'N/A'})"
             await temp_client.stop()
-        except Exception:
-            pass
-        await delete_session(user_id)
-        _clear_active_client(user_id)
-        return False, "expired", None
+            return True, None, user_info
 
-    except (UserDeactivated, UserDeactivatedBan):
-        try:
-            await temp_client.stop()
-        except Exception:
-            pass
-        await delete_session(user_id)
-        _clear_active_client(user_id)
-        return False, "deactivated", None
+        except (AuthKeyUnregistered, AuthKeyDuplicated, SessionRevoked, SessionExpired):
+            # Telegram confirmed: session is DEAD. Delete immediately, no retry.
+            try:
+                await temp_client.stop()
+            except Exception:
+                pass
+            await delete_session(user_id)
+            _clear_active_client(user_id)
+            return False, "expired", None
 
-    except FloodWait as e:
-        try:
-            await temp_client.stop()
-        except Exception:
-            pass
-        # Session exists and Telegram is rate-limiting us — session IS valid
-        return True, None, "(verified — rate limited)"
+        except (UserDeactivated, UserDeactivatedBan):
+            try:
+                await temp_client.stop()
+            except Exception:
+                pass
+            await delete_session(user_id)
+            _clear_active_client(user_id)
+            return False, "deactivated", None
 
-    except Exception as e:
-        try:
-            await temp_client.stop()
-        except Exception:
-            pass
-        error_str = str(e).lower()
-        print(f"[WARN] Session validation error for {user_id}: {e}")
+        except FloodWait as e:
+            try:
+                await temp_client.stop()
+            except Exception:
+                pass
+            # Telegram is rate-limiting — session IS valid
+            return True, None, "(verified — rate limited)"
 
-        # struct/unpack errors = Pyrogram version mismatch. Session IS valid in DB.
-        # DO NOT delete. Treat as ACTIVE.
-        if ("unpack" in error_str and "buffer" in error_str) or \
-           "not enough values to unpack" in error_str:
-            print(f"[INFO] Version mismatch for {user_id} — session treated as ACTIVE (not deleted)")
-            return True, None, "(saved in database)"
+        except Exception as e:
+            try:
+                await temp_client.stop()
+            except Exception:
+                pass
+            last_error = e
+            print(f"[WARN] Validate attempt {attempt+1}/{max_retries} for {user_id}: {e}")
+            if attempt < max_retries - 1:
+                import asyncio
+                await asyncio.sleep(1)
 
-        # Any other unknown error — don't delete, report as-is
-        return False, f"error: {e}", None
+    # All retries failed with non-Telegram errors → session exists in DB, trust it
+    print(f"[WARN] All validation attempts failed for {user_id}, treating as active: {last_error}")
+    return True, None, "(saved in database)"
+
 
 
 def _clear_active_client(user_id):

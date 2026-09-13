@@ -51,8 +51,12 @@ async def batch_range_command(client: Client, message: Message):
     chat_id1, start_id, _, is_priv1, expected_topic1 = parse_tg_link(start_link)
     chat_id2, _, end_id, is_priv2, expected_topic2 = parse_tg_link(end_link)
 
-    if not chat_id1 or not start_id or not end_id or start_id > end_id:
-        return await message.reply_text("❌ **Invalid links or range!** Make sure start ID is less than end ID.")
+    if not chat_id1 or not start_id or not end_id:
+        return await message.reply_text("❌ **Invalid links or range!**")
+
+    # Auto-fix reversed range
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
 
     expected_topic = expected_topic1 if expected_topic1 else None
 
@@ -84,16 +88,16 @@ async def batch_range_command(client: Client, message: Message):
                 if getattr(msg, "empty", False) or (not msg.text and not msg.media):
                     continue
                 
-                # Strict topic filtering
-                if expected_topic and msg.message_thread_id and msg.message_thread_id != expected_topic:
+                msg_thread = getattr(msg, 'message_thread_id', None)
+                if expected_topic and msg_thread and msg_thread != expected_topic:
                     continue
 
                 if msg and not msg.empty:
                     sub_status = await message.reply_text(f"🔄 **Processing Post {current_id}...**")
                     task_id = generate_task_id()
                     
-                    async def run_task():
-                        await process_and_send_message(client, user_id, msg, message.chat.id, sub_status, is_cancelled=is_cancelled, task_id=task_id)
+                    async def run_task(m=msg, ss=sub_status, tid=task_id):
+                        await process_and_send_message(client, user_id, m, message.chat.id, ss, is_cancelled=is_cancelled, task_id=tid)
                     
                     task = asyncio.create_task(run_task())
                     register_task(task_id, task, user_id)

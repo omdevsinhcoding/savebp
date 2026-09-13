@@ -21,6 +21,10 @@ async def single_post_saver(client: Client, message: Message):
     if not chat_id or not start_id:
         raise ContinuePropagation  # Not a valid Telegram link
 
+    # Auto-fix reversed range (e.g. 27672-12677 should be 12677-27672)
+    if start_id and end_id and start_id > end_id:
+        start_id, end_id = end_id, start_id
+
     status = await message.reply_text("🔎 **Fetching Message...**")
 
     user_client = None
@@ -104,14 +108,15 @@ async def single_post_saver(client: Client, message: Message):
                     if getattr(source_msg, "empty", False) or (not source_msg.text and not source_msg.media):
                         continue
                     
-                    if expected_topic and source_msg.message_thread_id and source_msg.message_thread_id != expected_topic:
+                    msg_thread = getattr(source_msg, 'message_thread_id', None)
+                    if expected_topic and msg_thread and msg_thread != expected_topic:
                         continue
 
                     if source_msg and not source_msg.empty:
                         sub_status = await message.reply_text(f"🔄 **Processing Post {current_id}...**")
                         task_id = generate_task_id()
-                        async def run_task():
-                            await process_and_send_message(client, user_id, source_msg, message.chat.id, sub_status, is_cancelled=is_cancelled, task_id=task_id)
+                        async def run_task(msg=source_msg, sub=sub_status, tid=task_id):
+                            await process_and_send_message(client, user_id, msg, message.chat.id, sub, is_cancelled=is_cancelled, task_id=tid)
                         
                         task = asyncio.create_task(run_task())
                         register_task(task_id, task, user_id)

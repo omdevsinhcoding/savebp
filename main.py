@@ -9,11 +9,14 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-print("[BOOT] Starting imports...", flush=True)
+import time as _bt
+_boot_start = _bt.time()
+print(f"[BOOT] Starting imports...", flush=True)
 from pyrogram import Client, idle
 from pyrogram.types import BotCommand
+print(f"[BOOT] Pyrogram imported ({_bt.time()-_boot_start:.1f}s)", flush=True)
 from config import API_ID, API_HASH, BOT_TOKEN, LOG_GROUP, OWNER_ID
-print("[BOOT] Imports done, creating client...", flush=True)
+print(f"[BOOT] Config loaded ({_bt.time()-_boot_start:.1f}s)", flush=True)
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -25,7 +28,7 @@ app = Client(
     bot_token=BOT_TOKEN,
     plugins=dict(root="plugins")
 )
-print("[BOOT] Client created, starting async main...", flush=True)
+print(f"[BOOT] Client created ({_bt.time()-_boot_start:.1f}s), starting...", flush=True)
 
 async def set_bot_commands():
     commands = [

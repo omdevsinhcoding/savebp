@@ -84,7 +84,6 @@ async def validate_session(user_id: int) -> tuple:
             last_error = e
             print(f"[WARN] Validate attempt {attempt+1}/{max_retries} for {user_id}: {e}")
             if attempt < max_retries - 1:
-                import asyncio
                 await asyncio.sleep(1)
 
     # All retries failed with non-Telegram errors → session exists in DB, trust it
@@ -239,6 +238,7 @@ async def login_step_listener(client: Client, message: Message):
 
     if step == "PHONE":
         phone_number = message.text.strip().replace(" ", "")
+        otp_status = await message.reply_text("📩 **Sending OTP to your number...**\n\nPlease wait...")
         temp_client = Client(f"temp_{user_id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
         try:
             await temp_client.connect()
@@ -249,7 +249,7 @@ async def login_step_listener(client: Client, message: Message):
                 "code_hash": code_hash.phone_code_hash,
                 "temp_client": temp_client
             }
-            await message.reply_text(
+            await otp_status.edit_text(
                 "📩 **OTP Sent!**\n\n"
                 "Please enter the OTP code sent to your Telegram app.\n"
                 "Format: Enter numbers separated by spaces (e.g. `1 2 3 4 5`) so Telegram doesn't auto-read it."
@@ -257,14 +257,14 @@ async def login_step_listener(client: Client, message: Message):
         except FloodWait as e:
             await temp_client.disconnect()
             del LOGIN_STATES[user_id]
-            await message.reply_text(
+            await otp_status.edit_text(
                 f"⏳ **Rate Limited!**\n\n"
                 f"Telegram is rate limiting. Please wait **{e.value} seconds** before trying again."
             )
         except Exception as e:
             await temp_client.disconnect()
             del LOGIN_STATES[user_id]
-            await message.reply_text(f"❌ **Login Error:** `{e}`\nPlease start again using `/login`.")
+            await otp_status.edit_text(f"❌ **Login Error:** `{e}`\nPlease start again using `/login`.")
 
     elif step == "OTP":
         otp_code = message.text.strip().replace(" ", "")

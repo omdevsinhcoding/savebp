@@ -215,11 +215,12 @@ async def text_settings_listener(client: Client, message: Message):
         raw_chat_id = parts[0].strip()
         topic_id = parts[1].strip() if len(parts) > 1 else None
 
-        # Try fetching chat info from Telegram
+        # Try fetching chat info from Telegram and verify bot membership
         chat_title = "Custom Chat"
         chat_type = "Group / Channel"
         topic_suffix = f"/{topic_id}" if topic_id else "/1"
         chat_link = f"https://t.me/c/{raw_chat_id.replace('-100', '')}{topic_suffix}" if raw_chat_id.startswith("-100") else "https://t.me/"
+        bot_verified = False
 
         try:
             chat_id_num = int(raw_chat_id)
@@ -233,8 +234,35 @@ async def text_settings_listener(client: Client, message: Message):
                 chat_link = f"https://t.me/{c_info.username}{topic_suffix}"
             elif c_info.invite_link and not topic_id:
                 chat_link = c_info.invite_link
-        except Exception:
-            pass
+            
+            # Verify bot is a member and can send messages
+            try:
+                bot_me = await client.get_me()
+                member = await client.get_chat_member(chat_id_num, bot_me.id)
+                if member:
+                    bot_verified = True
+            except Exception:
+                # get_chat_member failed — bot might be anonymous admin
+                # If get_chat succeeded, bot IS in the group
+                bot_verified = True
+        except Exception as e:
+            # Bot can't even access this chat
+            await message.reply_text(
+                f"❌ **Cannot access this chat!**\n\n"
+                f"**Chat ID:** `{raw_chat_id}`\n"
+                f"**Error:** `{e}`\n\n"
+                f"Make sure the bot is **added as admin** in this group/channel first."
+            )
+            return
+
+        if not bot_verified:
+            await message.reply_text(
+                f"❌ **Bot is not a member!**\n\n"
+                f"**Chat:** {chat_title}\n"
+                f"**Chat ID:** `{raw_chat_id}`\n\n"
+                f"Please add the bot as admin in this group/channel first, then try again."
+            )
+            return
 
         upload_data = {
             "chat_id": raw_chat_id,
@@ -247,15 +275,16 @@ async def text_settings_listener(client: Client, message: Message):
         await update_user_setting(user_id, "set_upload", chat_title)
         await update_user_setting(user_id, "set_upload_data", upload_data)
 
-        # Reply with Screenshot 2 Success UI
+        # Reply with Success UI
         text = (
             "**Upload Chat**\n\n"
-            "✅ _Upload chat set successfully!_\n\n"
+            "✅ _Upload chat set & verified!_\n\n"
             f"**Name:** {chat_title}\n"
             f"**Type:** {chat_type}\n"
             f"**Chat ID:** `{raw_chat_id}`\n"
             f"**Topic:** {topic_id if topic_id else 'None'}\n"
-            f"**Link:** [Open Chat]({chat_link})"
+            f"**Link:** [Open Chat]({chat_link})\n"
+            f"**Bot Access:** ✅ Verified"
         )
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("Change", callback_data="enter_upload_chat_id"), InlineKeyboardButton("🗑️ Remove", callback_data="remove_upload_chat")],

@@ -98,16 +98,19 @@ async def batch_range_command(client: Client, message: Message):
                 if msg and not msg.empty:
                     sub_status = await message.reply_text(f"🔄 **Processing Post {current_id}...**")
                     task_id = generate_task_id()
+                    task_result = False
                     
                     async def run_task(m=msg, ss=sub_status, tid=task_id):
-                        await process_and_send_message(client, user_id, m, message.chat.id, ss, is_cancelled=is_cancelled, task_id=tid)
+                        nonlocal task_result
+                        task_result = await process_and_send_message(client, user_id, m, message.chat.id, ss, is_cancelled=is_cancelled, task_id=tid)
                     
                     task = asyncio.create_task(run_task())
                     register_task(task_id, task, user_id)
                     
                     try:
                         await task
-                        processed_count += 1
+                        if task_result:
+                            processed_count += 1
                     except asyncio.CancelledError:
                         await sub_status.edit_text(f"🛑 **File Skipped by User!**")
                         await asyncio.sleep(1)

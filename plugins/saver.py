@@ -79,12 +79,17 @@ async def single_post_saver(client: Client, message: Message):
 
             try:
                 task_id = generate_task_id()
+                result = False
                 async def run_task():
-                    await process_and_send_message(client, user_id, source_msg, message.chat.id, status, is_cancelled=is_cancelled, task_id=task_id)
+                    nonlocal result
+                    result = await process_and_send_message(client, user_id, source_msg, message.chat.id, status, is_cancelled=is_cancelled, task_id=task_id)
                 task = asyncio.create_task(run_task())
                 register_task(task_id, task, user_id)
                 await task
-                await status.edit_text("✅ **Task Complete!**")
+                if result:
+                    await status.edit_text("✅ **Task Complete!**")
+                else:
+                    await status.edit_text("❌ **Failed to process this message.**")
             except asyncio.CancelledError:
                 await status.edit_text("🛑 **Process Cancelled!**")
             finally:
@@ -118,14 +123,17 @@ async def single_post_saver(client: Client, message: Message):
                     if source_msg and not source_msg.empty:
                         sub_status = await message.reply_text(f"🔄 **Processing Post {current_id}...**")
                         task_id = generate_task_id()
+                        task_result = False
                         async def run_task(msg=source_msg, sub=sub_status, tid=task_id):
-                            await process_and_send_message(client, user_id, msg, message.chat.id, sub, is_cancelled=is_cancelled, task_id=tid)
+                            nonlocal task_result
+                            task_result = await process_and_send_message(client, user_id, msg, message.chat.id, sub, is_cancelled=is_cancelled, task_id=tid)
                         
                         task = asyncio.create_task(run_task())
                         register_task(task_id, task, user_id)
                         try:
                             await task
-                            processed_count += 1
+                            if task_result:
+                                processed_count += 1
                         except asyncio.CancelledError:
                             await sub_status.edit_text("🛑 **File Skipped by User!**")
                             await asyncio.sleep(1)

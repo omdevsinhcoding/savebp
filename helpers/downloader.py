@@ -136,12 +136,18 @@ async def get_user_client(user_id: int, api_id: int, api_hash: str):
     return None
 
 
-async def _resolve_peer_safe(bot: Client, chat_id):
-    """Try to resolve a chat peer so the bot knows about it before sending."""
+async def _resolve_peer_safe(bot: Client, chat_id, user_client=None):
+    """Try to resolve a chat peer. Falls back to user_client if bot can't."""
     try:
         await bot.get_chat(chat_id)
         return True
     except Exception as e:
+        if user_client:
+            try:
+                await user_client.get_chat(chat_id)
+                return True
+            except Exception:
+                pass
         print(f"[WARN] Could not resolve peer {chat_id}: {e}")
         return False
 
@@ -189,9 +195,9 @@ async def _copy_media(bot: Client, dest_chat, uploaded_msg, topic_id, final_capt
             raise
 
 async def process_and_send_message(bot: Client, user_id: int, source_msg: Message, target_chat_id: int, status_msg: Message, is_cancelled=None, task_id=None):
+    """Process and send a message. Returns True on success, False on failure."""
     if getattr(source_msg, "empty", False) or (not source_msg.text and not source_msg.media):
-        # Safely skip deleted or service messages
-        return
+        return False
 
     tracker = ProgressTracker(status_msg, action_text="📥 Downloading Media", user_id=user_id, is_cancelled=is_cancelled, task_id=task_id)
     
@@ -253,6 +259,7 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
             # If download failed, try to copy/forward instead of stopping
             if not file_path or not os.path.exists(file_path):
                 print(f"[WARN] Download returned no file for user {user_id}, trying copy_message fallback")
+                any_copied = False
                 for dest_chat, topic_id in targets:
                     try:
                         copy_kw = {"caption": final_caption}
@@ -260,15 +267,22 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
                             copy_kw["message_thread_id"] = topic_id
                         try:
                             await bot.copy_message(dest_chat, source_msg.chat.id, source_msg.id, **copy_kw)
+                            any_copied = True
                         except TypeError as te:
                             if "message_thread_id" in str(te):
                                 copy_kw.pop("message_thread_id", None)
                                 await bot.copy_message(dest_chat, source_msg.chat.id, source_msg.id, **copy_kw)
+                                any_copied = True
                             else:
                                 raise
                     except Exception as copy_err:
                         print(f"[WARN] Copy fallback also failed to {dest_chat}: {copy_err}")
-                return
+                if not any_copied:
+                    try:
+                        await status_msg.edit_text("❌ **Download failed!** Could not download or forward this file.")
+                    except Exception:
+                        pass
+                return any_copied
 
             upload_tracker = ProgressTracker(status_msg, action_text="📤 Uploading Media", user_id=user_id, is_cancelled=is_cancelled)
             user_thumb = settings.get("thumbnail_id")
@@ -312,6 +326,8 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
                             print(f"[ERROR] Failed uploading media to fallback {new_dest}: {e2}")
                     else:
                         print(f"[ERROR] Failed uploading media to {dest_chat}: {e}")
+
+            return True  # At least one upload succeeded
 
         finally:
             if file_path and os.path.exists(file_path):
@@ -363,5 +379,5 @@ async def process_and_send_message(bot: Client, user_id: int, source_msg: Messag
                         print(f"[ERROR] Failed sending text to fallback {new_dest}: {e2}")
                 else:
                     print(f"[ERROR] Failed sending text to {dest_chat}: {e}")
-
+        return True
 
